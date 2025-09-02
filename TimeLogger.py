@@ -1,37 +1,175 @@
 import tkinter as tk
+from tkinter import ttk
 import csv
 from datetime import datetime
+from pathlib import Path
+import sys
 
-def start_logging():
-    global running
-    if not running:
-        running = True
+CSV_PATH = Path("log.csv")
+DT_FMT = "%Y-%m-%d %H:%M:%S"  # Excel-freundlich
 
-def stop_logging():
-    global running
-    if running:
-        series_count = entry.get()
-        if series_count:
-            with open("log.csv", mode="a", newline="") as file:
-                writer = csv.writer(file)
-                writer.writerow([datetime.now().isoformat(), series_count])
-            running = False
-            entry.delete(0, tk.END)  # Eingabefeld leeren
+# ---------- CSV Utils ----------
+def ensure_csv():
+    if not CSV_PATH.exists():
+        CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with CSV_PATH.open("w", newline="") as f:
+            pass  # kein Header
 
-# Einfaches GUI-Fenster
-root = tk.Tk()
-root.title("Logger")
+def read_rows():
+    ensure_csv()
+    with CSV_PATH.open("r", newline="") as f:
+        return [row for row in csv.reader(f)]
 
-running = False
+def write_rows(rows):
+    with CSV_PATH.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerows(rows)
 
-tk.Label(root, text="Anzahl Serien:").pack()
-entry = tk.Entry(root)
-entry.pack()
+def append_row(row):
+    with CSV_PATH.open("a", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(row)
 
-start_btn = tk.Button(root, text="Start", command=start_logging)
-start_btn.pack()
+def last_row_open_session(rows):
+    """
+    Offene Session = letzte Zeile hat start_time, aber leeres stop_time.
+    Erwartetes Schema: [start_time, stop_time, series_count]
+    """
+    if not rows:
+        return None
+    last = rows[-1]
+    # len check und: start vorhanden, stop leer
+    if len(last) >= 2 and last[0] and (last[1] == "" or last[1] is None):
+        return len(rows) - 1
+    return None
 
-stop_btn = tk.Button(root, text="Stop", command=stop_logging)
-stop_btn.pack()
+# ---------- App ----------
+class App(ttk.Frame):
+    def __init__(self, master):
+        super().__init__(master, padding=16)
+        self.master = master
+        self.running = False
 
-root.mainloop()
+        # Theme (macOS Aqua ignoriert Farben -> 'clam')
+        style = ttk.Style()
+        if sys.platform == "darwin":
+            try:
+                style.theme_use("clam")
+            except tk.TclError:
+                pass
+
+        self.grid(sticky="nsew")
+        self.master.title("Serien-Logger")
+        self.master.minsize(420, 220)
+        self.master.rowconfigure(0, weight=1)
+        self.master.columnconfigure(0, weight=1)
+
+        container = ttk.Frame(self, padding=(12, 12, 12, 12))
+        container.grid(sticky="nsew")
+        container.columnconfigure(1, weight=1)
+
+        title = ttk.Label(container, text="Serien-Logger", font=("Arial", 16, "bold"))
+        title.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+
+        ttk.Label(container, text="CSV-Datei:").grid(row=1, column=0, sticky="w", pady=(0, 6))
+        self.csv_var = tk.StringVar(value=str(CSV_PATH.resolve()))
+        ttk.Entry(container, textvariable=self.csv_var, state="readonly").grid(
+            row=1, column=1, columnspan=2, sticky="ew", padx=(8, 0), pady=(0, 6)
+        )
+
+        ttk.Label(container, text="Anzahl Serien (Pflicht bei Stop):").grid(row=2, column=0, sticky="w")
+        self.entry_series = ttk.Entry(container, width=12)
+        self.entry_series.grid(row=2, column=1, sticky="w", padx=(8, 0))
+
+        self.status_dot = ttk.Label(container, text="●", foreground="grey")
+        self.status_dot.grid(row=2, column=2, sticky="e")
+
+        btns = ttk.Frame(container, padding=(0, 8, 0, 0))
+        btns.grid(row=3, column=0, columnspan=3, sticky="w")
+        self.btn_start = ttk.Button(btns, text="Start", command=self.on_start, width=14)
+        self.btn_stop = ttk.Button(btns, text="Stop", command=self.on_stop, width=14, state="disabled")
+        self.btn_start.grid(row=0, column=0, padx=(0, 8))
+        self.btn_stop.grid(row=0, column=1)
+
+        self.msg_var = tk.StringVar(value="")
+        self.msg_label = ttk.Label(container, textvariable=self.msg_var, foreground="#444")
+        self.msg_label.grid(row=4, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        self.entry_series.bind("<Return>", lambda e: self.on_stop() if self.running else self.on_start())
+
+        ensure_csv()
+
+    def set_message(self, text, kind="info"):
+        colors = {"info": "#444", "ok": "#2fa14f", "warn": "#b58900", "error": "#c0392b"}
+        self.msg_var.set(text)
+        self.msg_label.configure(foreground=colors.get(kind, "#444"))
+
+    def set_running_ui(self, running: bool):
+        self.running = running
+        if running:
+            self.btn_start.state(["disabled"])
+            self.btn_stop.state(["!disabled"])
+            self.status_dot.configure(foreground="#2fa14f")
+        else:
+            self.btn_start.state(["!disabled"])
+            self.btn_stop.state(["disabled"])
+            self.status_dot.configure(foreground="grey")
+
+    def on_start(self):
+        if self.running:
+            return
+
+        rows = read_rows()
+        idx = last_row_open_session(rows)
+        if idx is not None:
+            # unvollständige Session verwerfen (nur Start drin)
+            rows.pop(idx)
+            write_rows(rows)
+
+        start_time = datetime.now().strftime(DT_FMT)
+        # Neue Zeile: [start_time, "", ""]
+        append_row([start_time, "", ""])
+
+        self.set_running_ui(True)
+        self.set_message(f"Gestartet: {start_time}", kind="ok")
+
+    def on_stop(self):
+        if not self.running:
+            return
+
+        series = self.entry_series.get().strip()
+        if not series.isdigit():
+            self.set_message("Bitte eine gültige ganze Zahl bei 'Anzahl Serien' eingeben!", kind="error")
+            self.entry_series.focus_set()
+            return
+
+        rows = read_rows()
+        if not rows:
+            self.set_message("Keine laufende Session gefunden.", kind="error")
+            self.set_running_ui(False)
+            return
+
+        last = rows[-1]
+        stop_time = datetime.now().strftime(DT_FMT)
+        # last Schema: [start_time, stop_time, series_count]
+        if len(last) < 3:
+            last += [""] * (3 - len(last))
+        last[1] = stop_time
+        last[2] = series
+        rows[-1] = last
+        write_rows(rows)
+
+        self.entry_series.delete(0, tk.END)
+        self.set_running_ui(False)
+        self.set_message(f"Gestoppt: {stop_time} – Serien {series} gespeichert.", kind="ok")
+
+
+def main():
+    root = tk.Tk()
+    root.rowconfigure(0, weight=1)
+    root.columnconfigure(0, weight=1)
+    App(root)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
